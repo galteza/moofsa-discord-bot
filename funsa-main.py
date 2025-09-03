@@ -1,59 +1,13 @@
-# import discord
-# from discord.ext import commands
-# import os
-# from dotenv import load_dotenv
-
-# load_dotenv()
-
-# TOKEN = os.getenv("DISCORD_TOKEN")
-
-# intents = discord.Intents.default()
-# intents.members = False
-# intents.message_content = True
-
-# bot = commands.Bot(command_prefix="!", intents=intents)
-
-# print(TOKEN)
-
-# # # Load cogs (modules)
-# # initial_cogs = ["cogs.greeter", "cogs.roles", "cogs.polls"]
-
-# # @bot.event
-# # async def on_ready():
-# #     print(f"✅ Logged in as {bot.user}")
-
-# # for cog in initial_cogs:
-# #     bot.load_extension(cog)
-
-# # bot.run("YOUR_BOT_TOKEN")
-
-
-
-
-# # import discord
-# # from discord.ext import commands
-
-# # intents = discord.Intents.default()
-# # intents.message_content = True  # Required for reading messages
-
-# # bot = commands.Bot(command_prefix="!", intents=intents)
-
-# @bot.event
-# async def on_ready():
-#     print(f"Logged in as {bot.user}")
-
-
-
-# bot.run(TOKEN)
-
 import discord
 from discord.ext import commands
 import os
 from dotenv import load_dotenv
+import logging 
 
 load_dotenv()
-TOKEN = "REMOVED"
+TOKEN = os.getenv("DISCORD_TOKEN")
 
+handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w')
 intents = discord.Intents.default()
 intents.members = False
 intents.message_content = True
@@ -68,4 +22,11 @@ async def on_ready():
 async def hello(ctx):
     await ctx.send("Hello! 👋")
 
-bot.run(TOKEN)
+# # Load cogs (modules)
+# initial_cogs = ["cogs.greeter", "cogs.roles", "cogs.polls"]
+
+
+# for cog in initial_cogs:
+#     bot.load_extension(cog)
+
+bot.run(TOKEN, log_handler=handler, log_level=logging.DEBUG)

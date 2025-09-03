@@ -1,7 +1,6 @@
 import discord
 from discord.ext import commands
 
-# Your org’s roles (update these names to match actual server roles)
 role_choices = ["Team A", "Team B", "Team C", "Team D"]
 
 class RoleAssigner(commands.Cog):
