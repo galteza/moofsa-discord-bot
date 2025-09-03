@@ -10,6 +10,7 @@ env/
 
 # Ignore environment files with secrets
 .env
+*.env
 
 # Ignore IDE/editor settings
 .vscode/
