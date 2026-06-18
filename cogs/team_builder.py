@@ -1,123 +1,137 @@
 import discord
 from discord.ext import commands
 import os
-import json
+from supabase import create_client, Client
 
-# ==== JSON LOADER PARAMETERS + FUNCTIONS ====
-
-DATA_FILE = "teams.json"
-
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
-
-# ==== TEAM BUILDER CODE ====
+# Initialize the persistent cloud client using environment tokens
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 class BuildTeam(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-        # ==== LOADING DATA FROM JSON FILE ====
-
-        self.data = load_data()
-
-        self.guild_id = None
-    
-    def get_guild_data(self, guild_id):
-        if str(guild_id) not in self.data:
-            self.data[str(guild_id)] = {}
-        return self.data[str(guild_id)]
-
-    @commands.command()
+    @commands.command(name="setup_team")
+    @commands.has_permissions(administrator=True)
     async def setup_team(self, ctx, team_role: str, desc: str = None):
-
-        # !setup_team "<team role name>" "<emoji>" "<description>"
-
-        # ==== DELETING COMMAND MESSAGE ====
-
+        """
+        Usage: !setup_team "Summer Internal 26" "Planning our flagship summer event!"
+        """
         try:
             await ctx.message.delete()
         except discord.Forbidden:
             print("Bot doesn't have permission to delete messages.")
 
-        # ==== LOAD GUILD INFO ====
+        guild = ctx.guild
+        guild_id = guild.id
 
-        self.guild_id = ctx.guild.id
+        # 1. AUTOMATED ROLE CREATION / FETCHING
+        role = discord.utils.get(guild.roles, name=team_role)
+        if not role:
+            role = await guild.create_role(
+                name=team_role, 
+                color=discord.Color.blue(), 
+                mentionable=True,
+                reason=f"NUFSA Team Generation Command for {team_role}"
+            )
 
-        # ==== POST MESSAGE ====
+        # 2. CHANNEL & CATEGORY SECURITY PERMISSIONS
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            
+            # Upgraded Bot Permissions
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True, 
+                manage_channels=True, 
+                manage_permissions=True
+            )
+        }
 
+        # 3. AUTOMATED CATEGORY & CHANNELS GENERATION
+        category_name = f"👥 {team_role}"
+        category = await guild.create_category(name=category_name, overwrites=overwrites)
+
+        await guild.create_text_channel(name="📢announcements", category=category)
+        await guild.create_text_channel(name="💬general-chat", category=category)
+
+        # 4. POST INTERACTIVE JOIN EMBED PANEL
         embed = discord.Embed(
-            title=team_role,
-            description=desc,
-            color=0x00ff00
+            title=f"Join Team: {team_role}",
+            description=(
+                f"{desc}\n\n"
+                "**How to Join:**\n"
+                "React with ✅ below to join this organizing committee! "
+                "Doing so automatically grants you the role and unlocks the private workspace category channels.\n\n"
+            ),
+            color=discord.Color.yellow()
         )
-
+        
         msg = await ctx.send(embed=embed)
-        self.message_id = msg.id
-
         await msg.add_reaction("✅")
 
-        # ==== UPDATE JSON ====
-
-        guild_id = ctx.guild.id
-        self.get_guild_data(guild_id)
-        self.data[str(guild_id)][str(msg.id)] = {
-            "team_name": team_role,
-            "description": desc
-        }
-        save_data(self.data)
+        # 5. UPDATE PERSISTENT CLOUD DATA STORAGE (SUPABASE)
+        try:
+            supabase.table("discord_teams").insert({
+                "message_id": str(msg.id),
+                "guild_id": str(guild_id),
+                "team_name": team_role,
+                "role_id": role.id,
+                "category_id": category.id
+            }).execute()
+            print(f"✅ Securely backed up team '{team_role}' tracking data to Supabase database.")
+        except Exception as e:
+            print(f"🚨 CLOUD SAVE FAILURE: Failed to push tracking data to Supabase: {e}")
+            await ctx.send(f"⚠️ Warning: Team created but database sync failed: {e}", delete_after=10)
 
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload):
-        # ==== GET GUILD, CHANNEL, MEMBER, & MESSAGE OF PAYLOAD ====
-        
-        guild_id = payload.guild_id
-        message_id = payload.message_id
-        guild = self.bot.get_guild(guild_id)
+        if payload.user_id == self.bot.user.id:
+            return  # Ignore the bot's own reaction setup marker
 
-        # ==== CHECK IF PAYLOAD WAS ON A MESSAGE STORED ====
+        # Query database to check if this message is an active tracking panel
+        try:
+            response = supabase.table("discord_teams").select("*").eq("message_id", str(payload.message_id)).execute()
+            
+            # If no data matches, this is just a normal chat message reaction. Ignore it.
+            if not response.data:
+                return
+                
+            stored_team = response.data[0]
+            guild = self.bot.get_guild(payload.guild_id)
+            member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
 
-        if (str(guild_id) not in self.data or str(message_id) not in self.data[str(guild_id)]):
-            return
-        
-        member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
-        if member.bot:
-            return
+            if str(payload.emoji) == "✅" and not member.bot:
+                role = guild.get_role(stored_team["role_id"])
+                if role:
+                    await member.add_roles(role)
+                    print(f"➕ Assigned team role to {member.display_name} via Supabase tracking record.")
+        except Exception as e:
+            print(f"🚨 ERROR in on_raw_reaction_add db lookup: {e}")
 
-        if str(payload.emoji) == "✅":
-            role_name = self.data[str(guild_id)][str(payload.message_id)]["team_name"]
-            print(role_name)
-            role = discord.utils.get(guild.roles, name=role_name)
-            await member.add_roles(role)
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload):
-        # ==== GET GUILD, CHANNEL, MEMBER, & MESSAGE OF PAYLOAD ====
-        
-        guild_id = payload.guild_id
-        guild = self.bot.get_guild(guild_id)
+        # Query database to check if this message is an active tracking panel
+        try:
+            response = supabase.table("discord_teams").select("*").eq("message_id", str(payload.message_id)).execute()
+            
+            if not response.data:
+                return
+                
+            stored_team = response.data[0]
+            guild = self.bot.get_guild(payload.guild_id)
+            member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
 
-        # ==== CHECK IF PAYLOAD WAS ON A MESSAGE STORED ====
+            if str(payload.emoji) == "✅" and not member.bot:
+                role = guild.get_role(stored_team["role_id"])
+                if role and role in member.roles:
+                    await member.remove_roles(role)
+                    print(f"➖ Removed team role from {member.display_name} via Supabase tracking record.")
+        except Exception as e:
+            print(f"🚨 ERROR in on_raw_reaction_remove db lookup: {e}")
 
-        if (str(guild_id) not in self.data or str(payload.message_id) not in self.data[str(guild_id)]):
-            return
-        
-        member = guild.get_member(payload.user_id) or await guild.fetch_member(payload.user_id)
-        if member.bot:
-            return
-        
-        if str(payload.emoji) == "✅":
-            role_name = self.data[str(guild_id)][str(payload.message_id)]["team_name"]
-            role = discord.utils.get(guild.roles, name=role_name)
-            if role in member.roles:
-                await member.remove_roles(role)
-        
 async def setup(bot):
     await bot.add_cog(BuildTeam(bot))

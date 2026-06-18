@@ -1,118 +1,104 @@
 import discord
 from discord.ext import commands, tasks
 import os
-import json
+import yaml
 from datetime import datetime, timezone
 
-# ==== JSON LOADER PARAMETERS + FUNCTIONS ====
+# ==== FILE SETUP (ONLY STATIC YAML NOW) ====
+CONFIG_FILE = "configs/guild_configs.yaml"
 
-DATA_FILE = "reminders.json"
-
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r") as f:
+            return yaml.safe_load(f) or {}
     return {}
 
-def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+def save_config(data):
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, indent=4)
 
-
-# ==== ACTUAL WELCOME CODE ====
+# ==== ACTUAL REMINDER CODE ====
 
 class EventReminder(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-
-        self.data = load_data()
-        
         self.remind_auto.start()
 
-    def get_guild_data(self, guild_id):
-        if str(guild_id) not in self.data:
-            self.data[str(guild_id)] = {
-                "channel" : None,
-                "events" : {}
-            }
-        return self.data[str(guild_id)]
-    
-    @commands.Cog.listener()
-    async def on_ready(self):
-        if not self.remind_auto.is_running():
-            self.remind_auto.start()
-
+    def cog_unload(self):
+        self.remind_auto.cancel()
 
     @commands.command()
+    @commands.has_permissions(administrator=True)
     async def set_reminder_channel(self, ctx):
-
-        # ==== DELETING COMMAND MESSAGE ====
         try:
             await ctx.message.delete()
         except discord.Forbidden:
-            print("Bot doesn't have permission to delete messages.")
+            pass
 
-        # ==== LOAD GUILD INFO ====
+        # Save channel ID strictly to the YAML
+        config = load_config()
+        config["reminder_channel"] = ctx.channel.id
+        save_config(config)
+        
+        msg = await ctx.send(f"✅ Event reminders will now be posted in {ctx.channel.mention}!")
+        await msg.delete(delay=3)
 
-        guild_data = self.get_guild_data(ctx.guild.id)
-        guild_data["channel"] = ctx.channel.id
-
-        save_data(self.data)
-
+    # ==== RUNS EXACTLY EVERY 10 MINUTES ====
     @tasks.loop(minutes=10)
     async def remind_auto(self):
-        for guild in self.bot.guilds:
-            await self._reminder(guild)
+        await self._process_reminders()
 
-    @commands.command()
-    async def remind_force(self, ctx):
-        guild = ctx.guild
-        await self._reminder(guild)
+    @remind_auto.before_loop
+    async def before_remind_auto(self):
+        await self.bot.wait_until_ready()
 
-    async def _reminder(self, guild):
-        guild_data = self.get_guild_data(guild.id)
-        channel_id = guild_data["channel"]
+    async def _process_reminders(self):
+        config = load_config()
+        channel_id = config.get("reminder_channel")
+        
+        if not channel_id:
+            return
+
         channel = self.bot.get_channel(channel_id)
-
-        if not channel_id or not channel:
-            print(f"No channel to post to in {guild.name}!")
+        if not channel:
             return
-        
+
+        guild = channel.guild
         events = await guild.fetch_scheduled_events()
-
-        if not events:
-            print("No upcoming events!")
-            return
-        
         now = datetime.now(timezone.utc)
-
-        for event in events:
-            name = event.name
-            if name not in guild_data["events"]:
-                guild_data["events"][name] = {
-                    "threedays" : False,
-                    "twodays" : False,
-                    "oneday" : False,
-                    "twohours" : False
-                }
-
-            time = event.start_time
-            diff = time - now
-            hours = diff.total_seconds() / 3600
-
-            if 48 <= hours < 72 and not guild_data["events"][name]["threedays"]:
-                await channel.send(f"Only 3 DAYS LEFT until {name}!!")
-                guild_data["events"][name]["threedays"] = True
-            elif 24 <= hours < 48 and not guild_data["events"][name]["twodays"]:
-                await channel.send(f"Only 2 DAYS LEFT until {name}!!")
-                guild_data["events"][name]["twodays"] = True
-            elif 2 <= hours < 24 and not guild_data["events"][name]["oneday"]:
-                await channel.send(f"Only 1 DAY LEFT until {name}!!")
-                guild_data["events"][name]["oneday"] = True
-            elif 0 <  hours < 2 and not guild_data["events"][name]["twohours"]: 
-                await channel.send (f"{name} starts in 2 HOURS!!")
-                guild_data["events"][name]["twohours"] = True
-        save_data(self.data)
         
+        for event in events:
+            # Time difference in minutes
+            diff = event.start_time - now
+            minutes_left = diff.total_seconds() / 60
+
+            # Ignore past events
+            if minutes_left < 0:
+                continue
+
+            name = event.name
+            url = event.url
+
+            # ==== THE STATELESS TRICK ====
+            # Because the loop runs every 10 minutes, we check if the event is inside a 10-minute window.
+            # This guarantees the reminder only fires exactly once without needing a JSON file to remember!
+            
+            # 3 Days = 4320 minutes
+            if 4320 <= minutes_left < 4330:
+                await channel.send(f"📅 Only **3 DAYS LEFT** until **{name}**!!\n{url}")
+                
+            # 2 Days = 2880 minutes
+            elif 2880 <= minutes_left < 2890:
+                await channel.send(f"⏳ Only **2 DAYS LEFT** until **{name}**!!\n{url}")
+                
+            # 1 Day = 1440 minutes
+            elif 1440 <= minutes_left < 1450:
+                await channel.send(f"🚨 Only **1 DAY LEFT** until **{name}**!!\n{url}")
+                
+            # 2 Hours = 120 minutes
+            elif 120 <= minutes_left < 130: 
+                await channel.send(f"🔥 **{name}** starts in **2 HOURS**!!\n{url}")
+
 async def setup(bot):
     await bot.add_cog(EventReminder(bot))
